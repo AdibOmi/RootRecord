@@ -1,0 +1,57 @@
+name: rootrecord
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rootrecord
+      POSTGRES_PASSWORD: rootrecord
+      POSTGRES_DB: rootrecord
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rootrecord -d rootrecord"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # File events don't cross Windows/macOS bind mounts; poll for --reload.
+      WATCHFILES_FORCE_POLLING: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads:/data/uploads
+
+  frontend:
+    build: ./frontend
+    env_file:
+      - path: ./frontend/.env
+        required: false
+    environment:
+      # Vite proxies /api to the backend, so cookies stay same-origin.
+      VITE_PROXY_TARGET: http://backend:8000
+      VITE_USE_POLLING: "true"
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:
+  uploads:
