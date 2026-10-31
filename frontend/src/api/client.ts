@@ -112,7 +112,8 @@ function refreshSession(): Promise<boolean> {
 
 const NO_REFRESH_PATHS = ['/auth/login', '/auth/refresh', '/auth/logout']
 
-export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+/** Send a request, refreshing the session once if it has expired. */
+async function sendAuthed(path: string, opts: RequestOptions): Promise<Response> {
   let res = await send(path, opts)
 
   if (res.status === 401 && !NO_REFRESH_PATHS.includes(path)) {
@@ -125,6 +126,11 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
 
   if (!res.ok) throw await toError(res)
+  return res
+}
+
+export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const res = await sendAuthed(path, opts)
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
@@ -136,6 +142,8 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  /** A file download, e.g. a PDF. */
+  blob: async (path: string) => (await sendAuthed(path, {})).blob(),
 }
 
 /** Human-readable message for any thrown value. */

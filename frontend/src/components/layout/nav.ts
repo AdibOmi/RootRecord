@@ -2,6 +2,8 @@ import {
   BarChart3Icon,
   BellRingIcon,
   CalendarDaysIcon,
+  CameraIcon,
+  FileTextIcon,
   LayoutDashboardIcon,
   type LucideIcon,
   ReceiptIcon,
@@ -23,6 +25,8 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: t.nav.dashboard, icon: LayoutDashboardIcon },
+  { to: '/scan', label: t.nav.scan, icon: CameraIcon, permission: 'prescriptions:scan' },
+  { to: '/prescriptions', label: t.nav.prescriptions, icon: FileTextIcon },
   { to: '/patients', label: t.nav.patients, icon: UsersIcon },
   { to: '/appointments', label: t.nav.appointments, icon: CalendarDaysIcon },
   { to: '/recalls', label: t.nav.recalls, icon: BellRingIcon },

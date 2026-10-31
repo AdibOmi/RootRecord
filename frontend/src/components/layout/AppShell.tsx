@@ -1,11 +1,13 @@
-import { MenuIcon } from 'lucide-react'
+import { CameraIcon, MenuIcon } from 'lucide-react'
 import { useState } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Link, Outlet } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useUser } from '@/features/auth/hooks'
 import { t } from '@/i18n'
+import { can } from '@/lib/permissions'
 
 import { GlobalSearch } from './GlobalSearch'
 import { Logo } from './Logo'
@@ -14,6 +16,7 @@ import { UserMenu } from './UserMenu'
 
 export function AppShell() {
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const user = useUser()
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -42,6 +45,14 @@ export function AppShell() {
             <div className="flex flex-1 justify-start">
               <GlobalSearch />
             </div>
+            {can(user, 'clinical:edit') && (
+              <Button asChild size="icon" className="sm:w-auto sm:px-4">
+                <Link to="/scan" aria-label={t.nav.scan}>
+                  <CameraIcon className="size-[18px]" />
+                  <span className="hidden sm:inline">{t.nav.scan}</span>
+                </Link>
+              </Button>
+            )}
             <UserMenu />
           </header>
 

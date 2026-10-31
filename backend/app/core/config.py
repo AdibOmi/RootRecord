@@ -25,6 +25,17 @@ class Settings(BaseSettings):
 
     cors_origins: Annotated[list[str], NoDecode] = []
     storage_dir: str = "/data/uploads"
+    max_upload_mb: int = 15
+
+    # Prescription photo extraction (Gemini vision, free tier). Without a key,
+    # scans are still saved and the dentist fills the record in by hand.
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
+
+    # Printed at the top of prescription PDFs shared with patients.
+    clinic_name: str = "Dental Clinic"
+    clinic_address: str | None = None
+    clinic_phone: str | None = None
 
     bootstrap_admin_email: str = "admin@rootrecord.app"
     bootstrap_admin_password: str = "Admin@12345"

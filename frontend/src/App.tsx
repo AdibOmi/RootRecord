@@ -12,7 +12,12 @@ import { t } from '@/i18n'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { PatientDetailPage } from '@/pages/PatientDetailPage'
+import { PatientsPage } from '@/pages/PatientsPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
+import { PrescriptionReviewPage } from '@/pages/PrescriptionReviewPage'
+import { PrescriptionsPage } from '@/pages/PrescriptionsPage'
+import { ScanPage } from '@/pages/ScanPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,7 +40,18 @@ const router = createBrowserRouter([
         element: <AppShell />,
         children: [
           { index: true, element: <DashboardPage /> },
-          { path: 'patients/*', element: <PlaceholderPage title={t.nav.patients} /> },
+          {
+            path: 'scan',
+            element: (
+              <RequirePermission permission="clinical:edit">
+                <ScanPage />
+              </RequirePermission>
+            ),
+          },
+          { path: 'prescriptions', element: <PrescriptionsPage /> },
+          { path: 'prescriptions/:id', element: <PrescriptionReviewPage /> },
+          { path: 'patients', element: <PatientsPage /> },
+          { path: 'patients/:id', element: <PatientDetailPage /> },
           { path: 'appointments/*', element: <PlaceholderPage title={t.nav.appointments} /> },
           { path: 'recalls/*', element: <PlaceholderPage title={t.nav.recalls} /> },
           {

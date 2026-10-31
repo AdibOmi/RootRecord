@@ -15,6 +15,10 @@ const PERMISSIONS = {
   'billing:manage': ['admin', 'receptionist'],
   'dues:view': ['admin', 'receptionist'],
   'patients:edit': ['admin', 'dentist', 'receptionist'],
+  /** Deletes the patient's prescriptions too. */
+  'patients:delete': ['admin'],
+  'prescriptions:scan': ['admin', 'dentist', 'receptionist'],
+  /** Confirm scanned prescriptions and correct filed ones. */
   'clinical:edit': ['admin', 'dentist'],
   'treatmentPlans:edit': ['admin', 'dentist'],
   'appointments:manage': ['admin', 'receptionist'],

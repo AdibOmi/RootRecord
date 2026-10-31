@@ -1,6 +1,8 @@
-import { CalendarCheckIcon, UserPlusIcon, UsersIcon, WalletIcon } from 'lucide-react'
+import { CalendarCheckIcon, CameraIcon, UserPlusIcon, UsersIcon, WalletIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 import { PageHeader } from '@/components/common/PageHeader'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useUser } from '@/features/auth/hooks'
@@ -35,6 +37,16 @@ export function DashboardPage() {
       <PageHeader
         title={`${greeting()}, ${firstName}`}
         description={`${t.dashboard.todayIs} ${formatLongDate(new Date())}`}
+        actions={
+          can(user, 'prescriptions:scan') && (
+            <Button size="lg" asChild>
+              <Link to="/scan">
+                <CameraIcon />
+                {t.nav.scan}
+              </Link>
+            </Button>
+          )
+        }
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

@@ -70,3 +70,9 @@ export function formatLongDate(value: Date | string): string {
 export function clinicHour(now: Date = new Date()): number {
   return Number(parts(now, { hour: '2-digit', hourCycle: 'h23' }).hour)
 }
+
+/** "2026-10-08" (a calendar date, no time zone) → "08/10/2026". */
+export function formatDay(isoDate: string): string {
+  const [year, month, day] = isoDate.split('-')
+  return `${day}/${month}/${year}`
+}

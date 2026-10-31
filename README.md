@@ -1,8 +1,18 @@
 # Root Record
 
-Patient management for a single dental clinic in Bangladesh: patient records, appointments, billing and payments. Staff-only (Admin, Dentist, Receptionist).
+Patient records for a single dental clinic in Bangladesh, built around the paper prescription. The dentist writes the prescription by hand as usual, takes a photo of it, and Root Record reads it (patient ID, name, date, what was done, medicines, advice, follow-up date) into the patient's record. Staff-only (Admin, Dentist, Receptionist).
 
-> **Status:** Phase 1 (foundation) is complete: auth, roles, and the app shell. Patients, appointments, billing and the dashboard come in later phases.
+> **Status:** Auth, roles and the app shell are done, and prescription scanning is the main feature. Appointments, recalls, billing and reports are still placeholders.
+
+## How prescription scanning works
+
+1. **Scan** (`/scan`, any staff member, usually the assistant): take a photo or pick one from the gallery. For a prescription with several pages or a back side, add each page (up to 6) before reading. The browser shrinks each photo to about 1 MB and uploads them together.
+2. **Read**: the backend stores the pages, answers straight away, and then (in the background) sends them to Google Gemini in one request (`gemini-3.6-flash` on the free tier, vision + structured output) to get the patient details, visit date, complaint, diagnosis, treatment done, medicines (dose patterns such as `1+0+1` kept as written), advice, follow-up date and notes. Teeth written in Palmer notation (a number in the corner of a cross) are converted to FDI numbers. The model also lists fields it found hard to read. The review page opens immediately and fills in by itself when reading finishes (usually 15–40 seconds), so the assistant can scan the next prescription meanwhile.
+3. **Review** (`/prescriptions/:id`, dentists and admins): the pages are shown next to an editable form. Assistants can see the draft, read it again or discard it, but only a dentist can save it. A missing phone number is flagged, because follow-up reminders need one. Hard-to-read fields are marked **Check**. Root Record suggests existing patients with the same ID or phone number, or a similar name. The dentist picks one or creates a new patient, then saves.
+4. **Record** (`/patients/:id`): saved prescriptions build the patient's visit history.
+5. **Share**: a filed prescription can be downloaded as a typed PDF (Bangla included) or, on a phone over HTTPS, shared straight to WhatsApp, Messenger or email. Internal notes are left out of the PDF.
+
+Nothing reaches a patient record until a dentist has checked it. If reading fails (no API key, no internet), the photo is still kept as a draft: fill it in by hand, or press *Read again*. Drafts wait under **Prescriptions → To review**.
 
 ## Quick start
 
@@ -30,7 +40,7 @@ Change this password after the first sign-in (user menu → *Change password*). 
 
 ## Configuration
 
-Both apps run with sensible development defaults, so `.env` files are optional. To override the defaults, copy the examples:
+Both apps run with sensible development defaults, so `.env` files are optional. The exception is reading prescriptions, which needs a free Gemini API key (from https://aistudio.google.com/apikey) in `GEMINI_API_KEY`. On the free tier Google may use what is sent to improve its products, so use a paid key before scanning real patients' prescriptions. To set it or override other defaults, copy the examples:
 
 ```bash
 cp backend/.env.example backend/.env
@@ -47,7 +57,11 @@ cp frontend/.env.example frontend/.env
 | `ACCESS_TOKEN_MINUTES` / `REFRESH_TOKEN_DAYS` | `15` / `7` | Token lifetimes |
 | `COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `CORS_ORIGINS` | – | Only needed if the frontend is not served via the proxy |
-| `STORAGE_DIR` | `/data/uploads` | Attachment storage (Docker volume) |
+| `STORAGE_DIR` | `/data/uploads` | Prescription photos (Docker volume) |
+| `MAX_UPLOAD_MB` | `15` | Largest photo accepted |
+| `GEMINI_API_KEY` | – | Needed to read prescriptions automatically |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Model used to read photos |
+| `CLINIC_NAME` / `CLINIC_ADDRESS` / `CLINIC_PHONE` | `Dental Clinic` / – / – | Header of prescription PDFs |
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | see above | First-run admin |
 
 **Frontend (`frontend/.env`)**

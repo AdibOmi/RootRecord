@@ -47,3 +47,9 @@ def require_roles(*roles: UserRole) -> Callable[[User], User]:
 
 
 AdminUser = Annotated[User, Depends(require_roles(UserRole.ADMIN))]
+# Any staff member (usually the assistant) can photograph and upload prescriptions.
+ScanUser = Annotated[
+    User, Depends(require_roles(UserRole.ADMIN, UserRole.DENTIST, UserRole.RECEPTIONIST))
+]
+# Only dentists (and admins) confirm what was read and file it in the record.
+ClinicalUser = Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.DENTIST))]
