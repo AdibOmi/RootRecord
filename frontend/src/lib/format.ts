@@ -22,6 +22,23 @@ export function takaToMinor(taka: number): number {
   return Math.round(taka * 100)
 }
 
+/** A typed taka amount ("1,500" or "1500.50") → minor units; null when blank or invalid. */
+export function parseTaka(text: string): number | null {
+  const cleaned = text.replace(/[,\s৳]/g, '')
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null
+  return takaToMinor(Number(cleaned))
+}
+
+/** Minor units → plain taka for an input box ("1500", "1500.5"). */
+export function minorToTakaInput(minor: number | null): string {
+  return minor == null ? '' : String(minor / 100)
+}
+
+/** "48291736" → "4829-1736", the way staff write it on the prescription. */
+export function formatPatientCode(code: string): string {
+  return /^\d{8}$/.test(code) ? `${code.slice(0, 4)}-${code.slice(4)}` : code
+}
+
 function parts(value: Date | string, options: Intl.DateTimeFormatOptions) {
   const date = typeof value === 'string' ? new Date(value) : value
   return new Intl.DateTimeFormat('en-GB', { timeZone: CLINIC_TIME_ZONE, ...options })

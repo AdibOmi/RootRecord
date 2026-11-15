@@ -28,6 +28,7 @@ export type PatientSex = 'male' | 'female' | 'other'
 
 export interface PatientRef {
   id: string
+  /** 8 digits, shown as 1234-5678 (see formatPatientCode). */
   patient_code: string
   full_name: string
 }
@@ -47,17 +48,21 @@ export interface PatientListItem extends Patient {
   next_follow_up_date: string | null
 }
 
+/** A new patient; their ID is always generated. */
 export interface PatientInput {
-  patient_code?: string | null
   full_name: string
   phone?: string | null
   age_years?: number | null
   sex?: PatientSex | null
 }
 
+export type MatchReason = 'same_id' | 'same_phone' | 'similar_name'
+
 export interface PatientMatch {
   patient: Patient
-  reasons: string[]
+  reasons: MatchReason[]
+  /** Same ID, or same phone and a similar name (families often share a phone). */
+  strong: boolean
 }
 
 export type PrescriptionStatus = 'draft' | 'confirmed'
@@ -97,6 +102,12 @@ export interface PrescriptionSummary {
   /** YYYY-MM-DD */
   follow_up_date: string | null
   notes: string | null
+  /** Minor units (1/100 BDT). */
+  billed_minor: number | null
+  paid_minor: number | null
+  due_minor: number | null
+  /** A dentist has checked what was read. */
+  verified: boolean
   has_extraction_error: boolean
   /** The photo is still being read; fields fill in when it finishes. */
   reading: boolean
@@ -114,14 +125,28 @@ export interface PrescriptionDetail extends Omit<PrescriptionSummary, 'extracted
   extracted: ExtractedPrescription | null
   extraction_error: string | null
   created_by: StaffRef
+  /** Who filed it under the patient (usually the assistant at payment). */
   confirmed_by: StaffRef | null
   confirmed_at: string | null
+  /** The dentist who checked what was read. */
+  verified_by: StaffRef | null
+  verified_at: string | null
   patient_matches: PatientMatch[]
 }
 
-export interface PrescriptionSaveInput {
+export interface PaymentInput {
+  billed_minor: number | null
+  paid_minor: number | null
+}
+
+/** File a scan under an existing or new patient, with the visit's bill. */
+export interface PrescriptionRegisterInput extends PaymentInput {
   patient_id?: string
   new_patient?: PatientInput
+}
+
+/** The dentist's checked version of what was read. */
+export interface PrescriptionSaveInput {
   visit_date: string
   chief_complaint: string | null
   diagnosis: string | null

@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { usePatients } from '@/features/patients/hooks'
 import { t } from '@/i18n'
-import { formatDay } from '@/lib/format'
+import { formatDay, formatPatientCode } from '@/lib/format'
 import { formatBDPhone } from '@/lib/phone'
 
 const PAGE_SIZE = 20
@@ -64,7 +64,9 @@ export function PatientsPage() {
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <span className="font-medium">{patient.full_name}</span>
-                      <span className="text-xs text-muted-foreground">{patient.patient_code}</span>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {formatPatientCode(patient.patient_code)}
+                      </span>
                     </div>
                     <p className="text-xs text-muted-foreground">
                       {[

@@ -43,7 +43,7 @@ const router = createBrowserRouter([
           {
             path: 'scan',
             element: (
-              <RequirePermission permission="clinical:edit">
+              <RequirePermission permission="prescriptions:scan">
                 <ScanPage />
               </RequirePermission>
             ),

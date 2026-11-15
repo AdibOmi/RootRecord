@@ -1,22 +1,23 @@
 import re
+import secrets
 import uuid
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select, text
+from sqlalchemy import ColumnElement, Select, func, literal, or_, select
 from sqlalchemy.orm import Session
 
-from app.core.errors import Conflict, NotFound
+from app.core.errors import NotFound
 from app.core.time import clinic_today
 from app.core.validators import normalize_bd_phone
 from app.models.patient import Patient, Prescription, PrescriptionStatus
 from app.schemas.common import PageParams
-from app.schemas.patient import PatientCreate, PatientUpdate
+from app.schemas.patient import MatchReason, PatientCreate, PatientUpdate
 
 # pg_trgm similarity above which a name counts as a possible match.
 NAME_SIMILARITY = 0.35
 MAX_MATCHES = 5
-_NEXT_CODE = text("SELECT nextval('patient_code_seq')")
 
 
 def get(db: Session, patient_id: uuid.UUID) -> Patient:
@@ -32,6 +33,8 @@ def _search(stmt: Select[Any], q: str) -> Select[Any]:
     conditions = [Patient.full_name.ilike(like), Patient.patient_code.ilike(like)]
     digits = re.sub(r"\D", "", q)
     if len(digits) >= 4:
+        # IDs are stored as 8 digits but often typed as 1234-5678.
+        conditions.append(Patient.patient_code.like(f"%{digits}%"))
         # Stored as +8801XXXXXXXXX; match typed 01XXX… or 8801XXX… by their tail.
         conditions.append(Patient.phone.like(f"%{digits.removeprefix('88').lstrip('0')}%"))
     return stmt.where(or_(*conditions))
@@ -73,29 +76,30 @@ def list_patients(
     return [tuple(r) for r in rows], total  # type: ignore[misc]
 
 
-def _ensure_code_free(db: Session, code: str, exclude_id: uuid.UUID | None = None) -> None:
-    stmt = select(Patient.id).where(func.lower(Patient.patient_code) == code.lower())
-    if exclude_id is not None:
-        stmt = stmt.where(Patient.id != exclude_id)
-    if db.scalar(stmt) is not None:
-        raise Conflict(
-            f"Another patient already has the ID {code}", code="patient_code_taken"
-        )
+def normalize_code(value: str) -> str | None:
+    """"1234-5678", "1234 5678" or "12345678" -> "12345678"; None if not an 8-digit ID."""
+    digits = re.sub(r"[\s\-]", "", value)
+    return digits if re.fullmatch(r"[1-9]\d{7}", digits) else None
+
+
+def format_code(code: str) -> str:
+    """"12345678" -> "1234-5678", the way it is written on prescriptions."""
+    return f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
 
 
 def _generate_code(db: Session) -> str:
+    """A random 8-digit ID. Random, not sequential: with the phone number it is the
+    patient's sign-in, so it must not be guessable from someone else's ID."""
     while True:
-        code = f"P-{db.scalar(_NEXT_CODE):05d}"
+        code = str(10_000_000 + secrets.randbelow(90_000_000))
         if db.scalar(select(Patient.id).where(Patient.patient_code == code)) is None:
             return code
 
 
 def create(db: Session, data: PatientCreate) -> Patient:
     """Add a patient without committing (callers commit with related changes)."""
-    if data.patient_code:
-        _ensure_code_free(db, data.patient_code)
     patient = Patient(
-        patient_code=data.patient_code or _generate_code(db),
+        patient_code=_generate_code(db),
         full_name=data.full_name,
         phone=data.phone,
         age_years=data.age_years,
@@ -107,14 +111,11 @@ def create(db: Session, data: PatientCreate) -> Patient:
 
 
 def update(db: Session, patient: Patient, data: PatientUpdate) -> Patient:
-    changes = data.model_dump(exclude_unset=True)
-    if changes.get("patient_code"):
-        _ensure_code_free(db, changes["patient_code"], exclude_id=patient.id)
-    for field, value in changes.items():
-        # Name and ID are required; the other fields can be cleared.
-        if value is None and field in ("patient_code", "full_name"):
+    for field_name, value in data.model_dump(exclude_unset=True).items():
+        # The name is required; the other fields can be cleared.
+        if value is None and field_name == "full_name":
             continue
-        setattr(patient, field, value)
+        setattr(patient, field_name, value)
     db.commit()
     return patient
 
@@ -134,22 +135,36 @@ def delete(db: Session, patient: Patient) -> None:
         path.unlink(missing_ok=True)
 
 
-def find_matches(db: Session, info: dict[str, Any] | None) -> list[tuple[Patient, list[str]]]:
-    """Existing patients who may be the person on a scanned prescription."""
+@dataclass
+class Match:
+    patient: Patient
+    reasons: list[MatchReason] = field(default_factory=list)
+
+    @property
+    def strong(self) -> bool:
+        """Same ID, or same phone and a similar name. Families often share one phone,
+        so the same phone with a different name is a different person."""
+        return "same_id" in self.reasons or {"same_phone", "similar_name"} <= set(self.reasons)
+
+
+def find_matches(db: Session, info: dict[str, Any] | None) -> list[Match]:
+    """Existing patients who may be the person on a scanned prescription, best first."""
     if not info:
         return []
-    found: dict[uuid.UUID, tuple[Patient, list[str]]] = {}
+    found: dict[uuid.UUID, Match] = {}
+    name = (info.get("full_name") or "").strip()
+    similarity: ColumnElement[float] = func.similarity(Patient.full_name, name) if name else literal(0.0)
 
-    def add(patients: list[Patient], reason: str) -> None:
-        for p in patients:
-            found.setdefault(p.id, (p, []))[1].append(reason)
+    def add(stmt: Select[Any], reason: MatchReason) -> None:
+        for patient, score in db.execute(stmt).all():
+            match = found.setdefault(patient.id, Match(patient))
+            for r in (reason, "similar_name" if score >= NAME_SIMILARITY else None):
+                if r and r not in match.reasons:
+                    match.reasons.append(r)
 
-    code = (info.get("patient_id") or "").strip()
+    code = normalize_code(str(info.get("patient_id") or ""))
     if code:
-        add(
-            list(db.scalars(select(Patient).where(func.lower(Patient.patient_code) == code.lower()))),
-            "Same patient ID",
-        )
+        add(select(Patient, similarity).where(Patient.patient_code == code), "same_id")
 
     phone = (info.get("phone") or "").strip()
     if phone:
@@ -158,23 +173,17 @@ def find_matches(db: Session, info: dict[str, Any] | None) -> list[tuple[Patient
         except ValueError:
             normalized = None
         if normalized:
-            add(list(db.scalars(select(Patient).where(Patient.phone == normalized))), "Same phone number")
+            add(select(Patient, similarity).where(Patient.phone == normalized), "same_phone")
 
-    name = (info.get("full_name") or "").strip()
     if name:
-        similarity = func.similarity(Patient.full_name, name)
         add(
-            list(
-                db.scalars(
-                    select(Patient)
-                    .where(similarity >= NAME_SIMILARITY)
-                    .order_by(similarity.desc())
-                    .limit(MAX_MATCHES)
-                )
-            ),
-            "Similar name",
+            select(Patient, similarity)
+            .where(similarity >= NAME_SIMILARITY)
+            .order_by(similarity.desc())
+            .limit(MAX_MATCHES),
+            "similar_name",
         )
 
-    # Patients matching on more signals first; dict order breaks ties.
-    ranked = sorted(found.values(), key=lambda m: -len(m[1]))
+    # Strong matches first, then those matching on more signals; dict order breaks ties.
+    ranked = sorted(found.values(), key=lambda m: (not m.strong, -len(m.reasons)))
     return ranked[:MAX_MATCHES]

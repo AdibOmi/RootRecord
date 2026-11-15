@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
-import { ApiError, errorMessage } from '@/api/client'
+import { errorMessage } from '@/api/client'
 import type { Patient, PatientSex } from '@/api/types'
 import { FormField } from '@/components/common/FormField'
 import { Button } from '@/components/ui/button'
@@ -23,7 +23,6 @@ import { useUpdatePatient } from './hooks'
 
 const schema = z.object({
   full_name: z.string().trim().min(2, t.validation.required),
-  patient_code: z.string().trim().min(1, t.validation.required),
   phone: z.string().refine((v) => !v.trim() || isValidBDPhone(v), t.validation.phone),
   age_years: z.string().refine((v) => !v.trim() || /^\d{1,3}$/.test(v.trim()), t.validation.age),
   sex: z.enum(['', 'male', 'female', 'other']),
@@ -37,7 +36,6 @@ const selectClass =
 function toValues(p: Patient): FormValues {
   return {
     full_name: p.full_name,
-    patient_code: p.patient_code,
     phone: p.phone ?? '',
     age_years: p.age_years != null ? String(p.age_years) : '',
     sex: p.sex ?? '',
@@ -59,7 +57,6 @@ export function EditPatientDialog({ patient, open, onOpenChange }: Props) {
     try {
       await mutation.mutateAsync({
         full_name: v.full_name.trim(),
-        patient_code: v.patient_code.trim(),
         phone: v.phone.trim() || null,
         age_years: v.age_years.trim() ? Number(v.age_years) : null,
         sex: (v.sex || null) as PatientSex | null,
@@ -67,11 +64,7 @@ export function EditPatientDialog({ patient, open, onOpenChange }: Props) {
       toast.success(t.patients.saved)
       onOpenChange(false)
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'patient_code_taken') {
-        form.setError('patient_code', { message: err.message })
-      } else {
-        toast.error(errorMessage(err))
-      }
+      toast.error(errorMessage(err))
     }
   })
 
@@ -91,9 +84,6 @@ export function EditPatientDialog({ patient, open, onOpenChange }: Props) {
         <form id="edit-patient" onSubmit={onSubmit} className="grid gap-4 sm:grid-cols-2" noValidate>
           <FormField id="ep-name" label={t.review.fullName} error={errors.full_name?.message}>
             <Input id="ep-name" aria-invalid={!!errors.full_name} {...form.register('full_name')} />
-          </FormField>
-          <FormField id="ep-code" label={t.review.patientId} error={errors.patient_code?.message}>
-            <Input id="ep-code" aria-invalid={!!errors.patient_code} {...form.register('patient_code')} />
           </FormField>
           <FormField id="ep-phone" label={t.review.phone} error={errors.phone?.message}>
             <Input

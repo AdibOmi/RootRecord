@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBDT, formatDate, formatDateTime, formatTime, takaToMinor } from './format'
+import {
+  formatBDT,
+  formatDate,
+  formatDateTime,
+  formatPatientCode,
+  formatTime,
+  minorToTakaInput,
+  parseTaka,
+  takaToMinor,
+} from './format'
 import { formatBDPhone, isValidBDPhone, normalizeBDPhone } from './phone'
 
 describe('formatBDT', () => {
@@ -41,5 +50,27 @@ describe('Bangladeshi phone numbers', () => {
   })
   it('formats for display', () => {
     expect(formatBDPhone('+8801712345678')).toBe('01712-345678')
+  })
+})
+
+describe('taka input', () => {
+  it('parses typed amounts into paisa', () => {
+    expect(parseTaka('1500')).toBe(150_000)
+    expect(parseTaka(' 1,500 ')).toBe(150_000)
+    expect(parseTaka('৳1500.5')).toBe(150_050)
+    expect(parseTaka('')).toBeNull()
+    expect(parseTaka('abc')).toBeNull()
+    expect(parseTaka('-5')).toBeNull()
+  })
+  it('round-trips through the input box', () => {
+    expect(minorToTakaInput(150_050)).toBe('1500.5')
+    expect(minorToTakaInput(null)).toBe('')
+  })
+})
+
+describe('formatPatientCode', () => {
+  it('groups the 8 digits as written on prescriptions', () => {
+    expect(formatPatientCode('48291736')).toBe('4829-1736')
+    expect(formatPatientCode('P-00001')).toBe('P-00001')
   })
 })

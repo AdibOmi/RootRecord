@@ -1,18 +1,22 @@
 # Root Record
 
-Patient records for a single dental clinic in Bangladesh, built around the paper prescription. The dentist writes the prescription by hand as usual, takes a photo of it, and Root Record reads it (patient ID, name, date, what was done, medicines, advice, follow-up date) into the patient's record. Staff-only (Admin, Dentist, Receptionist).
+Patient records for a single dental clinic in Bangladesh, built around the paper prescription. The dentist writes the prescription by hand as usual; the assistant photographs it at payment, and Root Record files the visit under the patient (what was done, medicines, advice, follow-up date, bill and dues). Staff-only for now (Admin, Dentist, Receptionist). Works on phones and can be installed to the home screen.
 
-> **Status:** Auth, roles and the app shell are done, and prescription scanning is the main feature. Appointments, recalls, billing and reports are still placeholders.
+> **Status:** Auth, roles, scanning, filing at payment and the dentist's check are done. Follow-up tracking, the patient portal, appointments and reports are next.
 
 ## How prescription scanning works
 
-1. **Scan** (`/scan`, any staff member, usually the assistant): take a photo or pick one from the gallery. For a prescription with several pages or a back side, add each page (up to 6) before reading. The browser shrinks each photo to about 1 MB and uploads them together.
-2. **Read**: the backend stores the pages, answers straight away, and then (in the background) sends them to Google Gemini in one request (`gemini-3.6-flash` on the free tier, vision + structured output) to get the patient details, visit date, complaint, diagnosis, treatment done, medicines (dose patterns such as `1+0+1` kept as written), advice, follow-up date and notes. Teeth written in Palmer notation (a number in the corner of a cross) are converted to FDI numbers. The model also lists fields it found hard to read. The review page opens immediately and fills in by itself when reading finishes (usually 15–40 seconds), so the assistant can scan the next prescription meanwhile.
-3. **Review** (`/prescriptions/:id`, dentists and admins): the pages are shown next to an editable form. Assistants can see the draft, read it again or discard it, but only a dentist can save it. A missing phone number is flagged, because follow-up reminders need one. Hard-to-read fields are marked **Check**. Root Record suggests existing patients with the same ID or phone number, or a similar name. The dentist picks one or creates a new patient, then saves.
-4. **Record** (`/patients/:id`): saved prescriptions build the patient's visit history.
-5. **Share**: a filed prescription can be downloaded as a typed PDF (Bangla included) or, on a phone over HTTPS, shared straight to WhatsApp, Messenger or email. Internal notes are left out of the PDF.
+1. **Scan** (`/scan`, any staff member, usually the assistant at payment): take a photo or pick one from the gallery. For a prescription with several pages or a back side, add each page (up to 6). The browser shrinks each photo to about 1 MB and uploads them together.
+2. **Quick read of the patient** (a few seconds, while the assistant waits): the backend stores the pages and sends a smaller copy of the first page to Google Gemini (`gemini-3.6-flash`, free tier, minimal "thinking") for just the name, phone, age, sex and patient ID. If that fails or is slow, the assistant types the name and phone instead.
+3. **File at payment** (`/prescriptions/:id`, any staff member): Root Record suggests existing patients. **Same ID**, or **same phone and a similar name**, is pre-selected as a returning patient. The same phone with a different name is only suggested, because families often share one number. Otherwise a new patient is created with a random **8-digit ID** (shown as `4829-1736`), which the assistant writes on the prescription. The ID never changes; with the phone number it will be the patient's sign-in. The assistant also enters the bill and the amount paid, and the due is worked out.
+4. **Full read** (background, usually 15–30 seconds): all pages go to Gemini in one request for the visit date, complaint, diagnosis, treatment done, medicines (dose patterns such as `1+0+1` kept as written), advice, follow-up date and notes. Teeth in Palmer notation are converted to FDI numbers, and hard-to-read fields are listed. The visit fills in by itself, even if it has already been filed.
+5. **Dentist's check**: filed visits are visible straight away but marked **Not checked by a doctor yet** (also on the PDF). Dentists find them under **Prescriptions → To check**, compare them with the photo (hard-to-read fields are marked **Check**), correct anything, and save, which marks the visit as checked. A late background read never overwrites a dentist's check.
+6. **Record** (`/patients/:id`): every visit with what was done, medicines, advice, follow-up, bill and due.
+7. **Share**: a filed visit can be downloaded as a typed PDF (Bangla included) or, on a phone over HTTPS, shared to WhatsApp, Messenger or email. Internal notes are left out of the PDF.
 
-Nothing reaches a patient record until a dentist has checked it. If reading fails (no API key, no internet), the photo is still kept as a draft: fill it in by hand, or press *Read again*. Drafts wait under **Prescriptions → To review**.
+If reading fails (no API key, no internet), the photo is kept: file it with the typed name and phone, then fill the rest in by hand or press *Read again*. Scans not yet filed under a patient wait under **Prescriptions → To file**.
+
+**Privacy:** on Gemini's free tier, Google may use what is sent to improve its products. Use a paid key (or a self-hosted model) before scanning real patients' prescriptions.
 
 ## Quick start
 
@@ -61,6 +65,8 @@ cp frontend/.env.example frontend/.env
 | `MAX_UPLOAD_MB` | `15` | Largest photo accepted |
 | `GEMINI_API_KEY` | – | Needed to read prescriptions automatically |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | Model used to read photos |
+| `GEMINI_HEADER_MODEL` | – (same as `GEMINI_MODEL`) | Model for the quick name/phone read; a `-lite` model is faster |
+| `GEMINI_THINKING_LEVEL` / `GEMINI_HEADER_THINKING_LEVEL` | `low` / `minimal` | Less thinking is faster. Gemini 3 only: leave empty for 2.x models |
 | `CLINIC_NAME` / `CLINIC_ADDRESS` / `CLINIC_PHONE` | `Dental Clinic` / – / – | Header of prescription PDFs |
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | see above | First-run admin |
 

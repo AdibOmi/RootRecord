@@ -1,6 +1,8 @@
-"""Scanned prescriptions: store the photo, read it, then file the reviewed record."""
+"""Scanned prescriptions: store the photo, read it, file it under a patient at
+payment, and let a dentist check what was read."""
 
 import io
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -21,12 +23,16 @@ from app.schemas.common import PageParams
 from app.schemas.patient import PatientMatch, PatientOut, PatientRef
 from app.schemas.prescription import (
     Medication,
+    PaymentFields,
     PrescriptionDetail,
+    PrescriptionRegister,
     PrescriptionSave,
     PrescriptionSummary,
     StaffRef,
 )
 from app.services import extraction_service, patient_service
+
+logger = logging.getLogger("rootrecord.prescriptions")
 
 # Long edge of the stored photo. Enough to read handwriting; keeps uploads to Gemini small.
 MAX_IMAGE_EDGE = 2400
@@ -110,7 +116,8 @@ def _medications(values: Any) -> list[dict[str, Any]]:
 def _apply_extraction(prescription: Prescription, data: dict[str, Any]) -> None:
     prescription.extracted = data
     prescription.extraction_error = None
-    prescription.visit_date = _date(data.get("visit_date"))
+    # Filing at payment sets the visit date to that day; keep it if none was read.
+    prescription.visit_date = _date(data.get("visit_date")) or prescription.visit_date
     prescription.chief_complaint = _text(data.get("chief_complaint"))
     prescription.diagnosis = _text(data.get("diagnosis"))
     prescription.procedures = _strings(data.get("procedures"))
@@ -132,9 +139,11 @@ def _extraction_error(prescription: Prescription) -> str | None:
 
 
 def start_reading(db: Session, prescription: Prescription) -> bool:
-    """Mark a draft as being read. Returns False if a read is already running."""
-    if prescription.status != PrescriptionStatus.DRAFT:
-        raise BadRequest("Only drafts can be read again", code="not_draft")
+    """Mark a prescription as being read. Returns False if a read is already running."""
+    if prescription.verified_at is not None:
+        raise BadRequest(
+            "A dentist has already checked this prescription", code="already_verified"
+        )
     if is_reading(prescription):
         return False
     prescription.reading_started_at = utcnow()
@@ -163,9 +172,10 @@ def read_in_background(prescription_id: uuid.UUID) -> None:
         except extraction_service.ExtractionError as exc:
             data, error = None, str(exc)
 
-        # The draft may have been filed or discarded while it was being read.
+        # A dentist may have checked it meanwhile; their version wins. (Filing it
+        # under a patient at payment does not touch what was read, so that is fine.)
         db.refresh(prescription)
-        if prescription.status != PrescriptionStatus.DRAFT:
+        if prescription.verified_at is not None:
             return
         if data is None:
             prescription.extraction_error = error
@@ -216,6 +226,27 @@ def scan(db: Session, user: User, pages: list[bytes]) -> Prescription:
     return prescription
 
 
+def read_header(db: Session, prescription: Prescription) -> None:
+    """Quickly read the patient's details from the first page, while staff wait.
+
+    Failure is fine: the assistant types the name and phone instead, and the full
+    read in the background tries again.
+    """
+    first_page = image_files(prescription)[0].read_bytes()
+    try:
+        data = extraction_service.extract_header(first_page)
+    except extraction_service.ExtractionError as exc:
+        logger.info("Header read failed: %s", exc)
+        return
+    patient = data.get("patient")
+    if isinstance(patient, dict):
+        prescription.extracted = {
+            "patient": patient,
+            "uncertain_fields": _strings(data.get("uncertain_fields")),
+        }
+        db.commit()
+
+
 # --- Queries -----------------------------------------------------------------
 
 
@@ -232,10 +263,15 @@ def list_prescriptions(
     *,
     status: PrescriptionStatus | None = None,
     patient_id: uuid.UUID | None = None,
+    verified: bool | None = None,
 ) -> tuple[list[Prescription], int]:
     stmt = select(Prescription)
     if status is not None:
         stmt = stmt.where(Prescription.status == status)
+    if verified is not None:
+        stmt = stmt.where(
+            Prescription.verified_at.is_not(None) if verified else Prescription.verified_at.is_(None)
+        )
     if patient_id is not None:
         stmt = stmt.where(Prescription.patient_id == patient_id)
 
@@ -249,73 +285,107 @@ def list_prescriptions(
     return list(rows), total
 
 
-def to_summary(p: Prescription) -> PrescriptionSummary:
+def _summary_fields(p: Prescription) -> dict[str, Any]:
     extracted_patient = (p.extracted or {}).get("patient") or {}
-    return PrescriptionSummary(
-        id=p.id,
-        status=p.status,
-        patient=PatientRef.model_validate(p.patient) if p.patient else None,
-        extracted_patient_name=_text(extracted_patient.get("full_name"), 120),
-        visit_date=p.visit_date,
-        chief_complaint=p.chief_complaint,
-        diagnosis=p.diagnosis,
-        procedures=p.procedures,
-        medications=[Medication.model_validate(m) for m in p.medications],
-        advice=p.advice,
-        follow_up_date=p.follow_up_date,
-        notes=p.notes,
-        has_extraction_error=_extraction_error(p) is not None,
-        reading=is_reading(p),
-        created_at=p.created_at,
-    )
+    return {
+        "id": p.id,
+        "status": p.status,
+        "patient": PatientRef.model_validate(p.patient) if p.patient else None,
+        "extracted_patient_name": _text(extracted_patient.get("full_name"), 120),
+        "visit_date": p.visit_date,
+        "chief_complaint": p.chief_complaint,
+        "diagnosis": p.diagnosis,
+        "procedures": p.procedures,
+        "medications": [Medication.model_validate(m) for m in p.medications],
+        "advice": p.advice,
+        "follow_up_date": p.follow_up_date,
+        "notes": p.notes,
+        "billed_minor": p.billed_minor,
+        "paid_minor": p.paid_minor,
+        "due_minor": p.due_minor,
+        "verified": p.verified_at is not None,
+        "has_extraction_error": _extraction_error(p) is not None,
+        "reading": is_reading(p),
+        "created_at": p.created_at,
+    }
+
+
+def to_summary(p: Prescription) -> PrescriptionSummary:
+    return PrescriptionSummary(**_summary_fields(p))
 
 
 def to_detail(db: Session, p: Prescription) -> PrescriptionDetail:
     matches: list[PatientMatch] = []
-    reading = is_reading(p)
-    if p.status == PrescriptionStatus.DRAFT and not reading:
+    if p.status == PrescriptionStatus.DRAFT:
         matches = [
-            PatientMatch(patient=PatientOut.model_validate(patient), reasons=reasons)
-            for patient, reasons in patient_service.find_matches(db, (p.extracted or {}).get("patient"))
+            PatientMatch(patient=PatientOut.model_validate(m.patient), reasons=m.reasons, strong=m.strong)
+            for m in patient_service.find_matches(db, (p.extracted or {}).get("patient"))
         ]
     return PrescriptionDetail(
-        id=p.id,
-        status=p.status,
-        patient=PatientRef.model_validate(p.patient) if p.patient else None,
-        visit_date=p.visit_date,
-        chief_complaint=p.chief_complaint,
-        diagnosis=p.diagnosis,
-        procedures=p.procedures,
-        medications=[Medication.model_validate(m) for m in p.medications],
-        advice=p.advice,
-        follow_up_date=p.follow_up_date,
-        notes=p.notes,
+        **_summary_fields(p),
         image_urls=[
             f"/api/v1/prescriptions/{p.id}/pages/{n}" for n in range(1, len(p.image_paths) + 1)
         ],
         extracted=p.extracted,
         extraction_error=_extraction_error(p),
-        reading=reading,
         created_by=StaffRef.model_validate(p.created_by),
         confirmed_by=StaffRef.model_validate(p.confirmed_by) if p.confirmed_by else None,
         confirmed_at=p.confirmed_at,
-        created_at=p.created_at,
+        verified_by=StaffRef.model_validate(p.verified_by) if p.verified_by else None,
+        verified_at=p.verified_at,
         patient_matches=matches,
     )
 
 
-# --- Review ------------------------------------------------------------------
+# --- Filing and review --------------------------------------------------------
 
 
-def save(db: Session, prescription: Prescription, data: PrescriptionSave, user: User) -> Prescription:
-    """File the reviewed prescription in a patient's record (or correct a filed one)."""
+def _set_payment(prescription: Prescription, data: PaymentFields) -> None:
+    prescription.billed_minor = data.billed_minor
+    prescription.paid_minor = data.paid_minor
+
+
+def register(
+    db: Session, prescription: Prescription, data: PrescriptionRegister, user: User
+) -> Prescription:
+    """File the prescription under a patient, with the visit's bill (at payment).
+
+    Works while the photo is still being read: the clinical details fill in when
+    reading finishes. Also used to move a filed visit to the right patient.
+    """
     if data.patient_id is not None:
         patient = patient_service.get(db, data.patient_id)
     else:
-        assert data.new_patient is not None  # enforced by PrescriptionSave
+        assert data.new_patient is not None  # enforced by PrescriptionRegister
         patient = patient_service.create(db, data.new_patient)
 
     prescription.patient = patient
+    _set_payment(prescription, data)
+    if prescription.status == PrescriptionStatus.DRAFT:
+        prescription.status = PrescriptionStatus.CONFIRMED
+        prescription.confirmed_by = user
+        prescription.confirmed_at = utcnow()
+        # Scanned at payment, so the visit is today unless the photo says otherwise.
+        prescription.visit_date = prescription.visit_date or clinic_today()
+    db.commit()
+    return prescription
+
+
+def set_payment(db: Session, prescription: Prescription, data: PaymentFields) -> Prescription:
+    if prescription.status != PrescriptionStatus.CONFIRMED:
+        raise BadRequest("Choose the patient first", code="not_filed")
+    _set_payment(prescription, data)
+    db.commit()
+    return prescription
+
+
+def save(db: Session, prescription: Prescription, data: PrescriptionSave, user: User) -> Prescription:
+    """Save the dentist's checked version of what was read, marking it as checked."""
+    if prescription.status != PrescriptionStatus.CONFIRMED:
+        raise BadRequest("Choose the patient first", code="not_filed")
+    if is_reading(prescription):
+        raise BadRequest("Wait until the prescription has been read", code="still_reading")
+
     prescription.visit_date = data.visit_date
     prescription.chief_complaint = data.chief_complaint or None
     prescription.diagnosis = data.diagnosis or None
@@ -324,12 +394,8 @@ def save(db: Session, prescription: Prescription, data: PrescriptionSave, user: 
     prescription.advice = data.advice
     prescription.follow_up_date = data.follow_up_date
     prescription.notes = data.notes or None
-    if prescription.status == PrescriptionStatus.DRAFT:
-        if is_reading(prescription):
-            raise BadRequest("Wait until the prescription has been read", code="still_reading")
-        prescription.status = PrescriptionStatus.CONFIRMED
-        prescription.confirmed_by = user
-        prescription.confirmed_at = utcnow()
+    prescription.verified_by = user
+    prescription.verified_at = utcnow()
     db.commit()
     return prescription
 

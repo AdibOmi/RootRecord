@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,9 +18,10 @@ class PatientSex(enum.StrEnum):
 
 
 class PrescriptionStatus(enum.StrEnum):
-    # Photo uploaded and read; waiting for the dentist to check it.
+    # Photo uploaded; not linked to a patient yet.
     DRAFT = "draft"
-    # Checked by a dentist and filed in the patient's record.
+    # Filed in a patient's record (usually by the assistant at payment). Whether a
+    # dentist has checked what was read is tracked separately (verified_at).
     CONFIRMED = "confirmed"
 
 
@@ -31,7 +32,8 @@ def _enum(cls: type[enum.Enum], name: str) -> Enum:
 class Patient(UUIDPk, Timestamps, Base):
     __tablename__ = "patients"
 
-    # The ID written on the clinic's prescriptions; generated (P-00001) when absent.
+    # Random 8 digits, generated once and never changed. Written on the patient's
+    # prescriptions; with their phone number it is also their sign-in.
     patient_code: Mapped[str] = mapped_column(String(40), unique=True)
     full_name: Mapped[str] = mapped_column(String(120))
     phone: Mapped[str | None] = mapped_column(String(20), index=True)
@@ -54,8 +56,16 @@ class Prescription(UUIDPk, Timestamps, Base):
         ForeignKey("patients.id", ondelete="RESTRICT"), index=True
     )
     created_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    # Who filed it in the patient's record, and when.
     confirmed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     confirmed_at: Mapped[datetime | None]
+    # The dentist who checked what was read. Until then it is shown as unchecked.
+    verified_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    verified_at: Mapped[datetime | None]
+
+    # Money for this visit in minor units (1/100 BDT). Due = billed - paid.
+    billed_minor: Mapped[int | None] = mapped_column(BigInteger)
+    paid_minor: Mapped[int | None] = mapped_column(BigInteger)
 
     visit_date: Mapped[date | None] = mapped_column(index=True)
     chief_complaint: Mapped[str | None] = mapped_column(Text)
@@ -78,3 +88,10 @@ class Prescription(UUIDPk, Timestamps, Base):
     patient: Mapped[Patient | None] = relationship(back_populates="prescriptions")
     created_by: Mapped[User] = relationship(foreign_keys=[created_by_id])
     confirmed_by: Mapped[User | None] = relationship(foreign_keys=[confirmed_by_id])
+    verified_by: Mapped[User | None] = relationship(foreign_keys=[verified_by_id])
+
+    @property
+    def due_minor(self) -> int | None:
+        if self.billed_minor is None:
+            return None
+        return max(self.billed_minor - (self.paid_minor or 0), 0)

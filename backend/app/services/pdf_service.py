@@ -9,6 +9,7 @@ from fpdf.enums import XPos, YPos
 
 from app.core.config import get_settings
 from app.models.patient import Prescription
+from app.services.patient_service import format_code
 
 FONTS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
@@ -96,7 +97,7 @@ def render(prescription: Prescription) -> bytes:
     pdf.set_font("NotoSans", "B", 12)
     pdf.cell(0, 7, patient.full_name, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     details = [
-        f"ID {patient.patient_code}",
+        f"ID {format_code(patient.patient_code)}",
         f"{patient.age_years} years" if patient.age_years is not None else None,
         patient.sex.value.title() if patient.sex else None,
         patient.phone,
@@ -147,10 +148,14 @@ def render(prescription: Prescription) -> bytes:
         pdf.set_font("NotoSans", "B", 11)
         pdf.cell(0, 7, f"Next visit: {_day(prescription.follow_up_date)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    if prescription.confirmed_by:
-        pdf.ln(6)
-        pdf.set_font("NotoSans", "", 9)
-        pdf.set_text_color(*MUTED)
-        pdf.cell(0, 5, f"Checked by {prescription.confirmed_by.full_name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(6)
+    pdf.set_font("NotoSans", "", 9)
+    pdf.set_text_color(*MUTED)
+    checked = (
+        f"Checked by {prescription.verified_by.full_name}"
+        if prescription.verified_by
+        else "Typed from the handwritten prescription; not yet checked by the doctor."
+    )
+    pdf.cell(0, 5, checked, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     return bytes(pdf.output())

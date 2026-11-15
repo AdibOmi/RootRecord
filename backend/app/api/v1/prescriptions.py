@@ -9,7 +9,13 @@ from app.core.config import get_settings
 from app.core.errors import BadRequest, NotFound
 from app.models.patient import PrescriptionStatus
 from app.schemas.common import Page, PageParams
-from app.schemas.prescription import PrescriptionDetail, PrescriptionSave, PrescriptionSummary
+from app.schemas.prescription import (
+    PrescriptionDetail,
+    PrescriptionPayment,
+    PrescriptionRegister,
+    PrescriptionSave,
+    PrescriptionSummary,
+)
 from app.services import pdf_service, prescription_service
 
 router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
@@ -21,14 +27,16 @@ def scan_prescription(
 ) -> PrescriptionDetail:
     """Upload photos of a handwritten prescription, one per page in order.
 
-    Returns a draft straight away (`reading` is true); the photos are read in the
-    background, so poll the draft until `reading` is false.
+    The patient's details are read straight away (a few seconds) so the assistant
+    can file the visit at the counter; `extracted.patient` is empty if that failed.
+    Everything else is read in the background: poll until `reading` is false.
     """
     prescription_service.check_page_count(len(files))
     # Read one byte past the limit so oversized files are rejected without loading them whole.
     limit = get_settings().max_upload_mb * 1024 * 1024 + 1
     pages = [file.file.read(limit) for file in files]
     prescription = prescription_service.scan(db, user, pages)
+    prescription_service.read_header(db, prescription)
     background.add_task(prescription_service.read_in_background, prescription.id)
     return prescription_service.to_detail(db, prescription)
 
@@ -40,9 +48,10 @@ def list_prescriptions(
     params: Annotated[PageParams, Depends()],
     status: PrescriptionStatus | None = None,
     patient_id: uuid.UUID | None = None,
+    verified: bool | None = None,
 ) -> Page[PrescriptionSummary]:
     rows, total = prescription_service.list_prescriptions(
-        db, params, status=status, patient_id=patient_id
+        db, params, status=status, patient_id=patient_id, verified=verified
     )
     return Page(
         items=[prescription_service.to_summary(r) for r in rows],
@@ -72,7 +81,7 @@ def get_prescription_page(
 def extract_again(
     prescription_id: uuid.UUID, db: DB, _: ScanUser, background: BackgroundTasks
 ) -> PrescriptionDetail:
-    """Read the photo again in the background, replacing the draft's fields."""
+    """Read the photo again in the background, replacing what was read (until a dentist checks it)."""
     prescription = prescription_service.get(db, prescription_id)
     if prescription_service.start_reading(db, prescription):
         background.add_task(prescription_service.read_in_background, prescription.id)
@@ -95,11 +104,32 @@ def prescription_pdf(prescription_id: uuid.UUID, db: DB, _: CurrentUser) -> Resp
     )
 
 
+@router.post("/{prescription_id}/register", response_model=PrescriptionDetail)
+def register_prescription(
+    prescription_id: uuid.UUID, body: PrescriptionRegister, db: DB, user: ScanUser
+) -> PrescriptionDetail:
+    """File the visit under an existing or new patient, with its bill (any staff, at payment).
+
+    Also moves a filed visit to a different patient.
+    """
+    prescription = prescription_service.get(db, prescription_id)
+    return prescription_service.to_detail(db, prescription_service.register(db, prescription, body, user))
+
+
+@router.put("/{prescription_id}/payment", response_model=PrescriptionDetail)
+def set_payment(
+    prescription_id: uuid.UUID, body: PrescriptionPayment, db: DB, _: ScanUser
+) -> PrescriptionDetail:
+    """Correct the bill or amount paid for a filed visit."""
+    prescription = prescription_service.get(db, prescription_id)
+    return prescription_service.to_detail(db, prescription_service.set_payment(db, prescription, body))
+
+
 @router.put("/{prescription_id}", response_model=PrescriptionDetail)
 def save_prescription(
     prescription_id: uuid.UUID, body: PrescriptionSave, db: DB, user: ClinicalUser
 ) -> PrescriptionDetail:
-    """Save the reviewed prescription to the patient's record."""
+    """The dentist's checked version of what was read; marks the visit as checked."""
     prescription = prescription_service.get(db, prescription_id)
     return prescription_service.to_detail(db, prescription_service.save(db, prescription, body, user))
 

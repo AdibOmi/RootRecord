@@ -16,7 +16,7 @@ AsRole = Callable[[UserRole], tuple[TestClient, User]]
 
 EXTRACTED: dict[str, Any] = {
     "patient": {
-        "patient_id": "RR-1042",
+        "patient_id": None,
         "full_name": "Rahima Begum",
         "age_years": 34,
         "sex": "female",
@@ -42,6 +42,8 @@ EXTRACTED: dict[str, Any] = {
     "uncertain_fields": ["medications.0.duration"],
 }
 
+NEW_PATIENT = {"full_name": "Rahima Begum", "phone": "01712345678", "age_years": 34, "sex": "female"}
+
 
 def _photo() -> bytes:
     buf = io.BytesIO()
@@ -63,8 +65,14 @@ def background_session(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def extraction(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Stub the Gemini call. Set state["error"] to simulate a failed read."""
-    state: dict[str, Any] = {"result": EXTRACTED, "error": None, "calls": 0}
+    """Stub the Gemini calls. Set state["error"] / state["header_error"] to simulate failures."""
+    state: dict[str, Any] = {
+        "result": EXTRACTED,
+        "error": None,
+        "calls": 0,
+        "header_error": None,
+        "header_calls": 0,
+    }
 
     def fake_extract(images: list[bytes], media_type: str = "image/jpeg", today: object = None) -> dict:
         state["calls"] += 1
@@ -74,7 +82,14 @@ def extraction(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             raise extraction_service.ExtractionError(state["error"])
         return state["result"]
 
+    def fake_header(first_page: bytes) -> dict:
+        state["header_calls"] += 1
+        if state["header_error"]:
+            raise extraction_service.ExtractionError(state["header_error"])
+        return {"patient": state["result"]["patient"], "uncertain_fields": ["patient.age_years"]}
+
     monkeypatch.setattr(extraction_service, "extract", fake_extract)
+    monkeypatch.setattr(extraction_service, "extract_header", fake_header)
     return state
 
 
@@ -93,15 +108,21 @@ def _scanned(client: TestClient, pages: int = 1) -> Any:
     return client.get(f"/api/v1/prescriptions/{res.json()['id']}").json()
 
 
+def _register(client: TestClient, rx_id: str, **body: Any) -> Any:
+    body.setdefault("new_patient", None if "patient_id" in body else NEW_PATIENT)
+    return client.post(f"/api/v1/prescriptions/{rx_id}/register", json=body)
+
+
+def _filed(client: TestClient, **body: Any) -> Any:
+    """Scan and file under a (new) patient, as the assistant does at payment."""
+    draft = _scanned(client)
+    res = _register(client, draft["id"], **body)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
 def _save_body(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
-        "new_patient": {
-            "patient_code": "RR-1042",
-            "full_name": "Rahima Begum",
-            "phone": "01712345678",
-            "age_years": 34,
-            "sex": "female",
-        },
         "visit_date": "2026-10-08",
         "diagnosis": "Irreversible pulpitis 36",
         "procedures": ["RCT 36 - access opening"],
@@ -113,33 +134,34 @@ def _save_body(**overrides: Any) -> dict[str, Any]:
     return body
 
 
-def test_assistant_scans_but_only_a_dentist_files(
+# --- Scanning and reading ------------------------------------------------------
+
+
+def test_scan_reads_the_patient_details_straight_away(
     as_role: AsRole, extraction: dict[str, Any]
 ) -> None:
     client, _ = as_role(UserRole.RECEPTIONIST)
-    draft = _scan(client)
-    assert draft.status_code == 201, draft.text
-    draft_id = draft.json()["id"]
-
-    assert client.put(f"/api/v1/prescriptions/{draft_id}", json=_save_body()).status_code == 403
-    assert client.post(f"/api/v1/prescriptions/{draft_id}/extract").status_code == 200
-
-    client, _ = as_role(UserRole.DENTIST)
-    res = client.put(f"/api/v1/prescriptions/{draft_id}", json=_save_body())
-    assert res.status_code == 200, res.text
-    assert res.json()["status"] == "confirmed"
+    res = _scan(client)
+    assert res.status_code == 201, res.text
+    body = res.json()
+    # Answered before the full read, but with the header already read.
+    assert body["reading"] is True
+    assert body["extracted"]["patient"]["full_name"] == "Rahima Begum"
+    assert body["extracted"]["uncertain_fields"] == ["patient.age_years"]
+    assert extraction["header_calls"] == 1
 
 
-def test_assistant_can_discard_drafts_only(as_role: AsRole, extraction: dict[str, Any]) -> None:
+def test_failed_header_read_does_not_block_the_scan(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
     client, _ = as_role(UserRole.RECEPTIONIST)
-    draft = _scan(client).json()
-    assert client.delete(f"/api/v1/prescriptions/{draft['id']}").status_code == 204
-
-    client, _ = as_role(UserRole.DENTIST)
-    filed = _scan(client).json()
-    client.put(f"/api/v1/prescriptions/{filed['id']}", json=_save_body())
-    client, _ = as_role(UserRole.RECEPTIONIST)
-    assert client.delete(f"/api/v1/prescriptions/{filed['id']}").status_code == 403
+    extraction["header_error"] = "busy"
+    res = _scan(client)
+    assert res.status_code == 201, res.text
+    assert res.json()["extracted"] is None
+    # The full read still fills everything in, including the patient.
+    after = client.get(f"/api/v1/prescriptions/{res.json()['id']}").json()
+    assert after["extracted"]["patient"]["phone"] == "01712345678"
 
 
 def test_pages_are_read_together(
@@ -176,6 +198,7 @@ def test_scan_creates_a_cleaned_up_draft(
 
     assert body["reading"] is False
     assert body["status"] == "draft"
+    assert body["verified"] is False
     assert body["patient"] is None
     assert body["visit_date"] == "2026-10-08"
     assert body["follow_up_date"] == "2026-10-15"
@@ -218,106 +241,6 @@ def test_non_image_upload_is_rejected(as_role: AsRole, extraction: dict[str, Any
     assert extraction["calls"] == 0
 
 
-def test_saving_files_the_prescription_under_a_new_patient(
-    as_role: AsRole, extraction: dict[str, Any]
-) -> None:
-    client, dentist = as_role(UserRole.DENTIST)
-    draft = _scan(client).json()
-
-    res = client.put(f"/api/v1/prescriptions/{draft['id']}", json=_save_body())
-    assert res.status_code == 200, res.text
-    saved = res.json()
-    assert saved["status"] == "confirmed"
-    assert saved["patient"]["patient_code"] == "RR-1042"
-    assert saved["confirmed_by"]["id"] == str(dentist.id)
-
-    patients = client.get("/api/v1/patients", params={"q": "rahima"}).json()
-    assert patients["total"] == 1
-    patient = patients["items"][0]
-    assert patient["phone"] == "+8801712345678"
-    assert patient["visit_count"] == 1
-    assert patient["last_visit_date"] == "2026-10-08"
-
-    history = client.get("/api/v1/prescriptions", params={"patient_id": patient["id"]}).json()
-    assert [p["id"] for p in history["items"]] == [draft["id"]]
-
-
-def test_next_scan_suggests_the_existing_patient(
-    as_role: AsRole, extraction: dict[str, Any]
-) -> None:
-    client, _ = as_role(UserRole.DENTIST)
-    first = _scan(client).json()
-    client.put(f"/api/v1/prescriptions/{first['id']}", json=_save_body())
-
-    second = _scanned(client)
-    matches = second["patient_matches"]
-    assert len(matches) == 1
-    assert matches[0]["patient"]["patient_code"] == "RR-1042"
-    assert set(matches[0]["reasons"]) == {"Same patient ID", "Same phone number", "Similar name"}
-
-    res = client.put(
-        f"/api/v1/prescriptions/{second['id']}",
-        json=_save_body(new_patient=None, patient_id=matches[0]["patient"]["id"], visit_date="2026-10-15"),
-    )
-    assert res.status_code == 200, res.text
-    patient = client.get("/api/v1/patients").json()["items"][0]
-    assert patient["visit_count"] == 2
-
-
-def test_duplicate_patient_code_is_rejected(as_role: AsRole, extraction: dict[str, Any]) -> None:
-    client, _ = as_role(UserRole.DENTIST)
-    first = _scan(client).json()
-    client.put(f"/api/v1/prescriptions/{first['id']}", json=_save_body())
-
-    second = _scan(client).json()
-    res = client.put(f"/api/v1/prescriptions/{second['id']}", json=_save_body())
-    assert res.status_code == 409
-    assert res.json()["error"]["code"] == "patient_code_taken"
-
-
-def test_patient_code_is_generated_when_missing(
-    as_role: AsRole, extraction: dict[str, Any]
-) -> None:
-    client, _ = as_role(UserRole.DENTIST)
-    draft = _scan(client).json()
-    res = client.put(
-        f"/api/v1/prescriptions/{draft['id']}",
-        json=_save_body(new_patient={"full_name": "Karim Hossain"}),
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["patient"]["patient_code"].startswith("P-")
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"follow_up_date": "2026-10-01"}, "The follow-up date cannot be before the visit date"),
-        ({"new_patient": None}, "Choose an existing patient or enter a new one"),
-    ],
-)
-def test_save_validation(
-    as_role: AsRole, extraction: dict[str, Any], overrides: dict[str, Any], message: str
-) -> None:
-    client, _ = as_role(UserRole.DENTIST)
-    draft = _scan(client).json()
-    res = client.put(f"/api/v1/prescriptions/{draft['id']}", json=_save_body(**overrides))
-    assert res.status_code == 422
-    assert message in [d["message"] for d in res.json()["error"]["details"]]
-
-
-def test_only_admin_deletes_filed_prescriptions(
-    as_role: AsRole, extraction: dict[str, Any], storage: Path
-) -> None:
-    client, _ = as_role(UserRole.DENTIST)
-    draft = _scan(client).json()
-    client.put(f"/api/v1/prescriptions/{draft['id']}", json=_save_body())
-    assert client.delete(f"/api/v1/prescriptions/{draft['id']}").status_code == 403
-
-    other = _scan(client).json()
-    assert client.delete(f"/api/v1/prescriptions/{other['id']}").status_code == 204
-    assert len(list((storage / "prescriptions").glob("*.jpg"))) == 1
-
-
 def test_interrupted_read_can_be_retried(
     as_role: AsRole, extraction: dict[str, Any], db: Session
 ) -> None:
@@ -333,24 +256,281 @@ def test_interrupted_read_can_be_retried(
     assert client.post(f"/api/v1/prescriptions/{draft['id']}/extract").json()["reading"] is True
 
 
-def test_draft_cannot_be_filed_while_reading(
+# --- Filing at payment ---------------------------------------------------------
+
+
+def test_assistant_files_a_new_patient_at_payment(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, assistant = as_role(UserRole.RECEPTIONIST)
+    draft = _scanned(client)
+    res = _register(client, draft["id"], billed_minor=150_000, paid_minor=100_000)
+    assert res.status_code == 200, res.text
+    filed = res.json()
+
+    assert filed["status"] == "confirmed"
+    assert filed["confirmed_by"]["id"] == str(assistant.id)
+    # Visible straight away, but not checked by a dentist yet.
+    assert filed["verified"] is False
+    assert filed["verified_by"] is None
+    code = filed["patient"]["patient_code"]
+    assert len(code) == 8 and code.isdigit() and code[0] != "0"
+    assert (filed["billed_minor"], filed["paid_minor"], filed["due_minor"]) == (150_000, 100_000, 50_000)
+
+    patients = client.get("/api/v1/patients", params={"q": "rahima"}).json()
+    assert patients["total"] == 1
+    patient = patients["items"][0]
+    assert patient["phone"] == "+8801712345678"
+    assert patient["visit_count"] == 1
+    assert patient["last_visit_date"] == "2026-10-08"
+    # The ID is found however it is typed.
+    assert client.get("/api/v1/patients", params={"q": f"{code[:4]}-{code[4:]}"}).json()["total"] == 1
+
+    history = client.get("/api/v1/prescriptions", params={"patient_id": patient["id"]}).json()
+    assert [p["id"] for p in history["items"]] == [draft["id"]]
+
+
+def test_visit_can_be_filed_while_still_reading(
     as_role: AsRole, extraction: dict[str, Any], db: Session
 ) -> None:
-    client, _ = as_role(UserRole.DENTIST)
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    extraction["error"] = "busy"  # nothing read yet: no visit date from the photo
     draft = _scanned(client)
     rx = prescription_service.get(db, draft["id"])
     rx.reading_started_at = prescription_service.utcnow()
     db.commit()
 
+    res = _register(client, draft["id"])
+    assert res.status_code == 200, res.text
+    assert res.json()["visit_date"] == prescription_service.clinic_today().isoformat()
+
+    # When reading finishes it still fills in the filed visit.
+    extraction["error"] = None
+    prescription_service.read_in_background(rx.id)
+    after = client.get(f"/api/v1/prescriptions/{draft['id']}").json()
+    assert after["diagnosis"] == "Irreversible pulpitis 36"
+    assert after["visit_date"] == "2026-10-08"
+    assert after["patient"]["full_name"] == "Rahima Begum"
+
+
+def test_returning_patient_is_matched_on_phone_and_name(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    first = _filed(client)
+
+    second = _scanned(client)
+    matches = second["patient_matches"]
+    assert len(matches) == 1
+    assert matches[0]["patient"]["id"] == first["patient"]["id"]
+    assert set(matches[0]["reasons"]) == {"same_phone", "similar_name"}
+    assert matches[0]["strong"] is True
+
+    res = _register(client, second["id"], patient_id=matches[0]["patient"]["id"])
+    assert res.status_code == 200, res.text
+    assert res.json()["patient"]["patient_code"] == first["patient"]["patient_code"]
+    assert client.get("/api/v1/patients").json()["items"][0]["visit_count"] == 2
+
+
+def test_family_member_on_the_same_phone_is_not_a_strong_match(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    _filed(client)
+
+    extraction["result"] = {
+        **EXTRACTED,
+        "patient": {**EXTRACTED["patient"], "full_name": "Tanvir Ahmed", "age_years": 9},
+    }
+    matches = _scanned(client)["patient_matches"]
+    assert [m["reasons"] for m in matches] == [["same_phone"]]
+    assert matches[0]["strong"] is False
+
+
+def test_id_written_on_the_prescription_is_a_strong_match(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    code = _filed(client)["patient"]["patient_code"]
+
+    extraction["result"] = {
+        **EXTRACTED,
+        "patient": {
+            "patient_id": f"{code[:4]}-{code[4:]}",
+            "full_name": None,
+            "age_years": None,
+            "sex": None,
+            "phone": None,
+        },
+    }
+    matches = _scanned(client)["patient_matches"]
+    assert matches[0]["patient"]["patient_code"] == code
+    assert matches[0]["reasons"] == ["same_id"]
+    assert matches[0]["strong"] is True
+
+
+def test_patient_id_cannot_be_chosen_or_changed(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    filed = _filed(client, new_patient={**NEW_PATIENT, "patient_code": "11111111"})
+    code = filed["patient"]["patient_code"]
+    assert code != "11111111"
+
+    res = client.patch(
+        f"/api/v1/patients/{filed['patient']['id']}", json={"patient_code": "22222222", "age_years": 35}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["patient_code"] == code
+    assert res.json()["age_years"] == 35
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"billed_minor": 1000, "paid_minor": 2000}, "The amount paid cannot be more than the bill"),
+        ({"paid_minor": 2000}, "Enter the bill before the amount paid"),
+        ({"new_patient": None}, "Choose an existing patient or enter a new one"),
+    ],
+)
+def test_register_validation(
+    as_role: AsRole, extraction: dict[str, Any], body: dict[str, Any], message: str
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    draft = _scanned(client)
+    res = client.post(
+        f"/api/v1/prescriptions/{draft['id']}/register", json={"new_patient": NEW_PATIENT, **body}
+    )
+    assert res.status_code == 422
+    assert message in [d["message"] for d in res.json()["error"]["details"]]
+
+
+def test_payment_can_be_corrected(as_role: AsRole, extraction: dict[str, Any]) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    draft = _scanned(client)
+    res = client.put(f"/api/v1/prescriptions/{draft['id']}/payment", json={"billed_minor": 500})
+    assert res.status_code == 400
+    assert res.json()["error"]["code"] == "not_filed"
+
+    filed = _register(client, draft["id"], billed_minor=200_000).json()
+    assert filed["due_minor"] == 200_000
+    res = client.put(
+        f"/api/v1/prescriptions/{filed['id']}/payment",
+        json={"billed_minor": 200_000, "paid_minor": 200_000},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["due_minor"] == 0
+
+
+# --- Dentist's check -----------------------------------------------------------
+
+
+def test_only_a_dentist_checks_what_was_read(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    filed = _filed(client)
+    assert client.put(f"/api/v1/prescriptions/{filed['id']}", json=_save_body()).status_code == 403
+
+    unchecked = client.get(
+        "/api/v1/prescriptions", params={"status": "confirmed", "verified": False}
+    ).json()
+    assert [p["id"] for p in unchecked["items"]] == [filed["id"]]
+
+    client, dentist = as_role(UserRole.DENTIST)
+    res = client.put(f"/api/v1/prescriptions/{filed['id']}", json=_save_body(diagnosis="Pulpitis 36"))
+    assert res.status_code == 200, res.text
+    checked = res.json()
+    assert checked["verified"] is True
+    assert checked["verified_by"]["id"] == str(dentist.id)
+    assert checked["diagnosis"] == "Pulpitis 36"
+    assert client.get("/api/v1/prescriptions", params={"verified": False}).json()["total"] == 0
+
+    # Once checked, it is not read again.
+    assert client.post(f"/api/v1/prescriptions/{filed['id']}/extract").status_code == 400
+
+
+def test_late_read_does_not_overwrite_the_dentists_check(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.DENTIST)
+    filed = _filed(client)
+    client.put(f"/api/v1/prescriptions/{filed['id']}", json=_save_body(diagnosis="Pulpitis 36"))
+
+    prescription_service.read_in_background(filed["id"])
+    assert client.get(f"/api/v1/prescriptions/{filed['id']}").json()["diagnosis"] == "Pulpitis 36"
+
+
+def test_draft_must_be_filed_before_it_is_checked(
+    as_role: AsRole, extraction: dict[str, Any]
+) -> None:
+    client, _ = as_role(UserRole.DENTIST)
+    draft = _scanned(client)
     res = client.put(f"/api/v1/prescriptions/{draft['id']}", json=_save_body())
     assert res.status_code == 400
+    assert res.json()["error"]["code"] == "not_filed"
+
+
+def test_cannot_be_checked_while_reading(
+    as_role: AsRole, extraction: dict[str, Any], db: Session
+) -> None:
+    client, _ = as_role(UserRole.DENTIST)
+    filed = _filed(client)
+    rx = prescription_service.get(db, filed["id"])
+    rx.reading_started_at = prescription_service.utcnow()
+    db.commit()
+
+    res = client.put(f"/api/v1/prescriptions/{filed['id']}", json=_save_body())
+    assert res.status_code == 400
     assert res.json()["error"]["code"] == "still_reading"
+
+
+def test_save_validation(as_role: AsRole, extraction: dict[str, Any]) -> None:
+    client, _ = as_role(UserRole.DENTIST)
+    filed = _filed(client)
+    res = client.put(
+        f"/api/v1/prescriptions/{filed['id']}", json=_save_body(follow_up_date="2026-10-01")
+    )
+    assert res.status_code == 422
+    messages = [d["message"] for d in res.json()["error"]["details"]]
+    assert "The follow-up date cannot be before the visit date" in messages
+
+
+# --- Deleting and sharing ------------------------------------------------------
+
+
+def test_assistant_can_discard_drafts_only(as_role: AsRole, extraction: dict[str, Any]) -> None:
+    client, _ = as_role(UserRole.RECEPTIONIST)
+    draft = _scan(client).json()
+    assert client.delete(f"/api/v1/prescriptions/{draft['id']}").status_code == 204
+
+    filed = _filed(client)
+    assert client.delete(f"/api/v1/prescriptions/{filed['id']}").status_code == 403
+
+
+def test_only_admin_deletes_filed_prescriptions(
+    as_role: AsRole, extraction: dict[str, Any], storage: Path
+) -> None:
+    client, _ = as_role(UserRole.DENTIST)
+    filed = _filed(client)
+    assert client.delete(f"/api/v1/prescriptions/{filed['id']}").status_code == 403
+
+    other = _scan(client).json()
+    assert client.delete(f"/api/v1/prescriptions/{other['id']}").status_code == 204
+    assert len(list((storage / "prescriptions").glob("*.jpg"))) == 1
+
+    client, _ = as_role(UserRole.ADMIN)
+    assert client.delete(f"/api/v1/prescriptions/{filed['id']}").status_code == 204
 
 
 def test_filed_prescription_downloads_as_pdf(as_role: AsRole, extraction: dict[str, Any]) -> None:
     client, _ = as_role(UserRole.DENTIST)
     draft = _scanned(client)
     assert client.get(f"/api/v1/prescriptions/{draft['id']}/pdf").status_code == 400
+
+    _register(client, draft["id"])
+    # Unchecked visits can be shared too (the PDF says it is not checked yet).
+    assert client.get(f"/api/v1/prescriptions/{draft['id']}/pdf").status_code == 200
 
     body = _save_body(advice=["Warm saline gargle", "গরম লবণ পানি দিয়ে কুলি করবেন"])
     client.put(f"/api/v1/prescriptions/{draft['id']}", json=body)
@@ -365,12 +545,12 @@ def test_admin_deletes_a_patient_with_their_prescriptions(
     as_role: AsRole, extraction: dict[str, Any], storage: Path
 ) -> None:
     client, _ = as_role(UserRole.DENTIST)
-    draft = _scanned(client)
-    patient_id = client.put(f"/api/v1/prescriptions/{draft['id']}", json=_save_body()).json()["patient"]["id"]
+    filed = _filed(client)
+    patient_id = filed["patient"]["id"]
     assert client.delete(f"/api/v1/patients/{patient_id}").status_code == 403
 
     client, _ = as_role(UserRole.ADMIN)
     assert client.delete(f"/api/v1/patients/{patient_id}").status_code == 204
     assert client.get(f"/api/v1/patients/{patient_id}").status_code == 404
-    assert client.get(f"/api/v1/prescriptions/{draft['id']}").status_code == 404
+    assert client.get(f"/api/v1/prescriptions/{filed['id']}").status_code == 404
     assert list((storage / "prescriptions").glob("*.jpg")) == []

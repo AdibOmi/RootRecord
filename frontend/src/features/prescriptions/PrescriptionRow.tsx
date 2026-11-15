@@ -1,10 +1,16 @@
-import { AlertTriangleIcon, CalendarClockIcon, ChevronRightIcon, Loader2Icon } from 'lucide-react'
+import {
+  AlertTriangleIcon,
+  CalendarClockIcon,
+  ChevronRightIcon,
+  Loader2Icon,
+  ShieldAlertIcon,
+} from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import type { PrescriptionSummary } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { t } from '@/i18n'
-import { formatDateTime, formatDay } from '@/lib/format'
+import { formatBDT, formatDateTime, formatDay, formatPatientCode } from '@/lib/format'
 
 /** One row in the prescriptions list. */
 export function PrescriptionRow({ p }: { p: PrescriptionSummary }) {
@@ -18,13 +24,21 @@ export function PrescriptionRow({ p }: { p: PrescriptionSummary }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{name ?? t.prescriptions.unmatched}</span>
           {p.patient && (
-            <span className="text-xs text-muted-foreground">{p.patient.patient_code}</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {formatPatientCode(p.patient.patient_code)}
+            </span>
           )}
           {!p.patient && name && <Badge variant="muted">{t.prescriptions.unmatched}</Badge>}
           {p.reading && (
             <Badge variant="muted" className="gap-1">
               <Loader2Icon className="size-3 animate-spin" />
               {t.prescriptions.reading}
+            </Badge>
+          )}
+          {p.status === 'confirmed' && !p.verified && !p.reading && (
+            <Badge variant="warning" className="gap-1">
+              <ShieldAlertIcon className="size-3" />
+              {t.prescriptions.notChecked}
             </Badge>
           )}
           {p.has_extraction_error && (
@@ -48,6 +62,11 @@ export function PrescriptionRow({ p }: { p: PrescriptionSummary }) {
             <span className="inline-flex items-center gap-1">
               <CalendarClockIcon className="size-3" />
               {t.prescriptions.followUp} {formatDay(p.follow_up_date)}
+            </span>
+          )}
+          {!!p.due_minor && (
+            <span className="font-medium text-destructive">
+              {t.prescriptions.due} {formatBDT(p.due_minor)}
             </span>
           )}
           {p.status === 'draft' && (

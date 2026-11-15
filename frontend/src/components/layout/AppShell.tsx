@@ -45,7 +45,7 @@ export function AppShell() {
             <div className="flex flex-1 justify-start">
               <GlobalSearch />
             </div>
-            {can(user, 'clinical:edit') && (
+            {can(user, 'prescriptions:scan') && (
               <Button asChild size="icon" className="sm:w-auto sm:px-4">
                 <Link to="/scan" aria-label={t.nav.scan}>
                   <CameraIcon className="size-[18px]" />

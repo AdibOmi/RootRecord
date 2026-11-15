@@ -1,7 +1,12 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { prescriptionsApi, type PrescriptionListParams } from '@/api/prescriptions'
-import type { PrescriptionDetail, PrescriptionSaveInput } from '@/api/types'
+import type {
+  PaymentInput,
+  PrescriptionDetail,
+  PrescriptionRegisterInput,
+  PrescriptionSaveInput,
+} from '@/api/types'
 import { PATIENTS_KEY } from '@/features/patients/hooks'
 
 export const PRESCRIPTIONS_KEY = ['prescriptions'] as const
@@ -56,6 +61,26 @@ export function useExtractAgain(id: string) {
   const store = useStoreDetail()
   return useMutation({
     mutationFn: () => prescriptionsApi.extractAgain(id),
+    onSuccess: store,
+  })
+}
+
+export function useRegisterPrescription(id: string) {
+  const store = useStoreDetail()
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: PrescriptionRegisterInput) => prescriptionsApi.register(id, body),
+    onSuccess: (detail) => {
+      store(detail)
+      void qc.invalidateQueries({ queryKey: PATIENTS_KEY })
+    },
+  })
+}
+
+export function useSetPayment(id: string) {
+  const store = useStoreDetail()
+  return useMutation({
+    mutationFn: (body: PaymentInput) => prescriptionsApi.setPayment(id, body),
     onSuccess: store,
   })
 }

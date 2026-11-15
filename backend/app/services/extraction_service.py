@@ -3,14 +3,17 @@
 The output is a draft only: a dentist always reviews it before it is filed.
 """
 
+import io
 import json
 import logging
+import time
 from datetime import date
 from typing import Any
 
 import httpx
 from google import genai
 from google.genai import errors, types
+from PIL import Image
 
 from app.core.config import get_settings
 
@@ -124,6 +127,9 @@ digits, choose the year closest to today's date given below.
 lower left 3x, lower right 4x; milk teeth 5x-8x), e.g. "Sensitivity on 15", "Extraction \
 of 48". If the quadrant is unclear, still give your best FDI number and list the field \
 in uncertain_fields.
+- patient_id: the clinic's patient ID is an 8-digit number, often written as \
+1234-5678 by the receptionist near the top. Return its 8 digits only, without spaces \
+or dashes.
 - age_years: whole years only.
 - phone: digits as written.
 - Transcribe text in the language it is written in, keeping Bangla as Bangla.
@@ -134,10 +140,52 @@ If the image is not a prescription or is unreadable, return nulls and empty list
 explain in notes."""
 
 
-def extract(
-    images: list[bytes], media_type: str = "image/jpeg", today: date | None = None
+HEADER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["patient", "uncertain_fields"],
+    "properties": {
+        "patient": EXTRACTION_SCHEMA["properties"]["patient"],
+        "uncertain_fields": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+HEADER_PROMPT = """\
+You read the header of a photographed handwritten prescription from a dental clinic \
+in Bangladesh: the patient's name, age, sex, phone number and the clinic's patient ID \
+(an 8-digit number, sometimes written as 1234-5678; return its digits only). Return \
+only what you can read with confidence; leave anything else null and list it in \
+uncertain_fields using the paths "patient.full_name", "patient.phone", \
+"patient.patient_id", "patient.age_years" or "patient.sex". Keep Bangla names in \
+Bangla. phone: digits as written. age_years: whole years only."""
+
+# Long edge of the photo sent for the header read: enough for the name and phone.
+HEADER_IMAGE_EDGE = 1600
+
+
+def _shrink(image: bytes, edge: int) -> bytes:
+    with Image.open(io.BytesIO(image)) as img:
+        if max(img.size) <= edge:
+            return image
+        img = img.convert("RGB")
+        img.thumbnail((edge, edge))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=85)
+        return out.getvalue()
+
+
+def _generate(
+    *,
+    model: str,
+    contents: list[Any],
+    system_prompt: str,
+    schema: dict[str, Any],
+    thinking_level: str | None,
+    max_output_tokens: int,
+    timeout_ms: int,
+    attempts: int,
 ) -> dict[str, Any]:
-    """Return the fields read from a prescription's pages, matching EXTRACTION_SCHEMA."""
+    """One structured-output call to Gemini; errors become ExtractionError."""
     settings = get_settings()
     if not settings.gemini_api_key:
         raise ExtractionError(
@@ -146,25 +194,27 @@ def extract(
     client = genai.Client(
         api_key=settings.gemini_api_key,
         http_options=types.HttpOptions(
-            timeout=90_000,  # milliseconds
-            # The free tier often answers 503 (busy); reading runs in the background, so retry.
-            retry_options=types.HttpRetryOptions(attempts=3),
+            timeout=timeout_ms,
+            # The free tier often answers 503 (busy), so retry.
+            retry_options=types.HttpRetryOptions(attempts=attempts),
         ),
     )
-    today_text = (today or date.today()).isoformat()
+    thinking = (
+        types.ThinkingConfig(thinking_level=types.ThinkingLevel(thinking_level.upper()))
+        if thinking_level
+        else None
+    )
 
     try:
         response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=[
-                *(types.Part.from_bytes(data=image, mime_type=media_type) for image in images),
-                f"Today's date is {today_text}.",
-            ],
+            model=model,
+            contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 response_mime_type="application/json",
-                response_json_schema=EXTRACTION_SCHEMA,
-                max_output_tokens=16000,
+                response_json_schema=schema,
+                max_output_tokens=max_output_tokens,
+                thinking_config=thinking,
             ),
         )
     except errors.APIError as exc:
@@ -178,6 +228,8 @@ def extract(
             ) from exc
         logger.warning("Extraction failed: %s %s", exc.code, exc.message)
         raise ExtractionError("The prescription could not be read. Try again or fill it in by hand.") from exc
+    except httpx.TimeoutException as exc:
+        raise ExtractionError("Reading took too long. Try again or fill it in by hand.") from exc
     except httpx.TransportError as exc:
         raise ExtractionError("Could not reach the reading service. Check the internet connection.") from exc
 
@@ -193,7 +245,58 @@ def extract(
     if not text:
         raise ExtractionError("The prescription could not be read. Try again or fill it in by hand.")
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         logger.warning("Extraction returned invalid JSON: %.200s", text)
         raise ExtractionError("The prescription could not be read. Try again or fill it in by hand.") from exc
+    if not isinstance(data, dict):
+        raise ExtractionError("The prescription could not be read. Try again or fill it in by hand.")
+    return data
+
+
+def extract(
+    images: list[bytes], media_type: str = "image/jpeg", today: date | None = None
+) -> dict[str, Any]:
+    """Return everything read from a prescription's pages, matching EXTRACTION_SCHEMA."""
+    settings = get_settings()
+    today_text = (today or date.today()).isoformat()
+    started = time.monotonic()
+    data = _generate(
+        model=settings.gemini_model,
+        contents=[
+            *(types.Part.from_bytes(data=image, mime_type=media_type) for image in images),
+            f"Today's date is {today_text}.",
+        ],
+        system_prompt=SYSTEM_PROMPT,
+        schema=EXTRACTION_SCHEMA,
+        thinking_level=settings.gemini_thinking_level,
+        max_output_tokens=16000,
+        timeout_ms=90_000,
+        attempts=3,
+    )
+    logger.info("Full read took %.1fs for %d page(s)", time.monotonic() - started, len(images))
+    return data
+
+
+def extract_header(first_page: bytes) -> dict[str, Any]:
+    """Quickly read only the patient details, matching HEADER_SCHEMA.
+
+    The assistant waits for this at the counter, so it is kept small and short:
+    one downscaled page, little thinking, a tight timeout and a single retry.
+    """
+    settings = get_settings()
+    started = time.monotonic()
+    data = _generate(
+        model=settings.gemini_header_model or settings.gemini_model,
+        contents=[types.Part.from_bytes(data=_shrink(first_page, HEADER_IMAGE_EDGE), mime_type="image/jpeg")],
+        system_prompt=HEADER_PROMPT,
+        schema=HEADER_SCHEMA,
+        thinking_level=settings.gemini_header_thinking_level,
+        max_output_tokens=1000,
+        # A healthy read takes 3-5 s; the free tier sometimes stalls, and retrying
+        # a stalled request is faster than waiting it out.
+        timeout_ms=8_000,
+        attempts=2,
+    )
+    logger.info("Header read took %.1fs", time.monotonic() - started)
+    return data

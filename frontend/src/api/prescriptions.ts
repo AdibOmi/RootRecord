@@ -1,7 +1,9 @@
 import { api } from './client'
 import type {
   Page,
+  PaymentInput,
   PrescriptionDetail,
+  PrescriptionRegisterInput,
   PrescriptionSaveInput,
   PrescriptionStatus,
   PrescriptionSummary,
@@ -10,6 +12,7 @@ import type {
 export interface PrescriptionListParams {
   status?: PrescriptionStatus
   patient_id?: string
+  verified?: boolean
   page?: number
   page_size?: number
 }
@@ -25,6 +28,10 @@ export const prescriptionsApi = {
     api.get<Page<PrescriptionSummary>>('/prescriptions', { ...params }),
   get: (id: string) => api.get<PrescriptionDetail>(`/prescriptions/${id}`),
   extractAgain: (id: string) => api.post<PrescriptionDetail>(`/prescriptions/${id}/extract`),
+  register: (id: string, body: PrescriptionRegisterInput) =>
+    api.post<PrescriptionDetail>(`/prescriptions/${id}/register`, body),
+  setPayment: (id: string, body: PaymentInput) =>
+    api.put<PrescriptionDetail>(`/prescriptions/${id}/payment`, body),
   save: (id: string, body: PrescriptionSaveInput) =>
     api.put<PrescriptionDetail>(`/prescriptions/${id}`, body),
   delete: (id: string) => api.delete<undefined>(`/prescriptions/${id}`),

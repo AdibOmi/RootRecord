@@ -5,6 +5,7 @@ import {
   EllipsisVerticalIcon,
   FileTextIcon,
   PencilIcon,
+  ShieldAlertIcon,
   Trash2Icon,
   UserXIcon,
 } from 'lucide-react'
@@ -41,7 +42,7 @@ import { useDeletePatient, usePatient } from '@/features/patients/hooks'
 import { usePrescriptions } from '@/features/prescriptions/hooks'
 import { SharePrescription } from '@/features/prescriptions/SharePrescription'
 import { t } from '@/i18n'
-import { formatDay } from '@/lib/format'
+import { formatBDT, formatDay, formatPatientCode } from '@/lib/format'
 import { can } from '@/lib/permissions'
 import { formatBDPhone } from '@/lib/phone'
 
@@ -89,7 +90,7 @@ export function PatientDetailPage() {
 
   const p = patient.data
   const facts = [
-    [t.review.patientId, p.patient_code],
+    [t.review.patientId, formatPatientCode(p.patient_code)],
     [t.review.phone, p.phone && formatBDPhone(p.phone)],
     [t.review.age, p.age_years],
     [t.review.sex, p.sex && t.sex[p.sex]],
@@ -267,12 +268,35 @@ function VisitCard({ rx, patientName }: { rx: PrescriptionSummary; patientName: 
     ],
     [t.patients.advice, rx.advice.length > 0 && <List items={rx.advice} />],
     [t.patients.notes, rx.notes],
+    [
+      t.patients.payment,
+      rx.billed_minor != null && (
+        <span>
+          {formatBDT(rx.billed_minor)}
+          {!!rx.due_minor && (
+            <span className="font-medium text-destructive">
+              {' · '}
+              {t.payment.due} {formatBDT(rx.due_minor)}
+            </span>
+          )}
+          {rx.due_minor === 0 && <span className="text-success"> · {t.payment.paidInFull}</span>}
+        </span>
+      ),
+    ],
   ]
 
   return (
     <Card>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-        <CardTitle className="text-base">{rx.visit_date ? formatDay(rx.visit_date) : '—'}</CardTitle>
+        <div className="flex flex-wrap items-center gap-2">
+          <CardTitle className="text-base">{rx.visit_date ? formatDay(rx.visit_date) : '—'}</CardTitle>
+          {!rx.verified && (
+            <Badge variant="warning" className="gap-1">
+              <ShieldAlertIcon className="size-3" />
+              {t.prescriptions.notChecked}
+            </Badge>
+          )}
+        </div>
         {rx.follow_up_date && (
           <Badge variant="accent" className="gap-1">
             <CalendarClockIcon className="size-3" />

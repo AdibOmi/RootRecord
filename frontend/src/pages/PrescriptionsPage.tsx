@@ -1,7 +1,7 @@
-import { CameraIcon, FileCheckIcon, InboxIcon } from 'lucide-react'
+import { BadgeCheckIcon, CameraIcon, FileCheckIcon, InboxIcon } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import type { PrescriptionStatus } from '@/api/types'
+import type { PrescriptionListParams } from '@/api/prescriptions'
 import { EmptyState } from '@/components/common/EmptyState'
 import { PageHeader } from '@/components/common/PageHeader'
 import { Pagination } from '@/components/common/Pagination'
@@ -17,16 +17,31 @@ import { cn } from '@/lib/utils'
 
 const PAGE_SIZE = 20
 
+/** "draft": scans without a patient. "unchecked": filed, not checked by a dentist yet. */
+type Tab = 'draft' | 'unchecked' | 'confirmed'
+
+const TAB_FILTERS: Record<Tab, Pick<PrescriptionListParams, 'status' | 'verified'>> = {
+  draft: { status: 'draft' },
+  unchecked: { status: 'confirmed', verified: false },
+  confirmed: { status: 'confirmed' },
+}
+
+function parseTab(value: string | null): Tab {
+  return value === 'unchecked' || value === 'confirmed' ? value : 'draft'
+}
+
 export function PrescriptionsPage() {
   const user = useUser()
   const [params, setParams] = useSearchParams()
-  const status: PrescriptionStatus = params.get('status') === 'confirmed' ? 'confirmed' : 'draft'
+  const status = parseTab(params.get('status'))
   const page = Number(params.get('page')) || 1
-  const query = usePrescriptions({ status, page, page_size: PAGE_SIZE })
-  const drafts = usePrescriptions({ status: 'draft', page_size: 1 })
+  const query = usePrescriptions({ ...TAB_FILTERS[status], page, page_size: PAGE_SIZE })
+  const drafts = usePrescriptions({ ...TAB_FILTERS.draft, page_size: 1 })
+  const unchecked = usePrescriptions({ ...TAB_FILTERS.unchecked, page_size: 1 })
 
-  const tabs: { value: PrescriptionStatus; label: string; count?: number }[] = [
+  const tabs: { value: Tab; label: string; count?: number }[] = [
     { value: 'draft', label: t.prescriptions.toReview, count: drafts.data?.total },
+    { value: 'unchecked', label: t.prescriptions.toCheck, count: unchecked.data?.total },
     { value: 'confirmed', label: t.prescriptions.filed },
   ]
 
@@ -47,7 +62,7 @@ export function PrescriptionsPage() {
         }
       />
 
-      <div role="tablist" className="mb-4 inline-flex rounded-lg border bg-card p-1">
+      <div role="tablist" className="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border bg-card p-1">
         {tabs.map((tab) => (
           <button
             key={tab.value}
@@ -56,7 +71,7 @@ export function PrescriptionsPage() {
             aria-selected={status === tab.value}
             onClick={() => setParams({ status: tab.value })}
             className={cn(
-              'flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors',
+              'flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors',
               status === tab.value && 'bg-secondary text-secondary-foreground',
             )}
           >
@@ -88,6 +103,12 @@ export function PrescriptionsPage() {
             icon={InboxIcon}
             title={t.prescriptions.emptyDraftsTitle}
             description={t.prescriptions.emptyDraftsBody}
+          />
+        ) : status === 'unchecked' ? (
+          <EmptyState
+            icon={BadgeCheckIcon}
+            title={t.prescriptions.emptyUncheckedTitle}
+            description={t.prescriptions.emptyUncheckedBody}
           />
         ) : (
           <EmptyState
